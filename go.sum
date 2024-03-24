@@ -1,5 +1,5 @@
-github.com/evanj/hacks v0.0.0-20240216144940-99739d386a95 h1:MDM2f3avkDA+Md82n1lm6k6Cbl1Cf4etjJOz8glqnFM=
-github.com/evanj/hacks v0.0.0-20240216144940-99739d386a95/go.mod h1:HlrWZNeHake8zcmv6zra4QUwi4RhfYKFgHqEDQgxces=
+github.com/evanj/hacks v0.0.0-20240324180601-124bb09a195d h1:YrX/pjo/iyxOj4HhMN1pnArkSmCxlCGqNE2HQ+Z3ruA=
+github.com/evanj/hacks v0.0.0-20240324180601-124bb09a195d/go.mod h1:dVPkjy6ZKWIf9N4IwAqiJYJnxMW6l3qSiWtUHfH1hSk=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
 github.com/golang/protobuf v1.5.4/go.mod h1:lnTiLA8Wa4RWRcIUkrtSVa5nRhsEGBg48fD6rSs7xps=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=

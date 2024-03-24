@@ -3,7 +3,7 @@ module github.com/evanj/gogrpcping
 go 1.22.1
 
 require (
-	github.com/evanj/hacks v0.0.0-20240216144940-99739d386a95
+	github.com/evanj/hacks v0.0.0-20240324180601-124bb09a195d
 	google.golang.org/grpc v1.62.1
 	google.golang.org/protobuf v1.33.0
 )

@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +22,7 @@ import (
 )
 
 const echoMessage = "ping"
+const tcpInitialBufferBytes = 4096
 
 type echoServer struct {
 	echopb.UnimplementedEchoServer
@@ -44,9 +47,9 @@ func main() {
 	measurements := flag.Int("measurements", 10000, "number of pings to measure")
 	podIPEnvVar := flag.String("podIPEnvVar", "POD_IP",
 		"environment variable with IP address to exclude")
-	remoteAddr := flag.String("remoteAddr", "gogrpcping-service", "DNS name to look up to find other addresses")
-	serviceDiscoverySleep := flag.Duration("serviceDiscoverySleep", time.Second,
-		"time to sleep to give k8s DNS time to update")
+	remoteAddr := flag.String("remoteAddr", "", "IP/DNS name for remote endpoints")
+	remoteLookupSleep := flag.Duration("remoteLookupSleep", 0,
+		"sleep before looking up/connecting to remoteAddr: give time to start")
 	flag.Parse()
 
 	slog.Info("starting TCP and gRPC servers ...",
@@ -73,55 +76,18 @@ func main() {
 		panic(err)
 	}
 
-	// wait for kubernetes DNS to update hopefully
-	slog.Info("sleeping to give k8s DNS time to update",
-		slog.Duration("serviceDiscoverySleep", *serviceDiscoverySleep))
-	time.Sleep(*serviceDiscoverySleep)
-
-	selfAddress := os.Getenv(*podIPEnvVar)
-	slog.Info("self address",
-		slog.String("podIPEnvVar", *podIPEnvVar),
-		slog.String("selfAddress", selfAddress))
-
-	addrs, err := net.LookupHost(*remoteAddr)
-	if err != nil {
-		panic(err)
-	}
-	slog.Info("found remote addresses",
-		slog.String("remoteAddr", *remoteAddr),
-		slog.String("addrs", strings.Join(addrs, ",")))
-
-	// remove self address from the list
-	for i, addr := range addrs {
-		if addr == selfAddress {
-			addrs = slices.Delete(addrs, i, i+1)
-			break
-		}
-	}
-
-	slog.Info("final addresses",
-		slog.String("addrs", strings.Join(addrs, ",")))
-
-	type namedClients struct {
-		name   string
-		client echoClient
-	}
 	clients := []namedClients{
 		{"localhost_tcp", localhostTCPClient},
 		{"localhost_grpc", localhostGRPCClient},
 	}
 
-	for _, addr := range addrs {
-		tcpClient, err := newTCPEchoClient(addr, *tcpPort)
+	if *remoteAddr != "" {
+		remoteClients, err := connectRemoteClients(
+			*remoteAddr, *remoteLookupSleep, *podIPEnvVar, *tcpPort, *grpcPort)
 		if err != nil {
 			panic(err)
 		}
-		grpcClient, err := newGRPCEchoClient(addr, *grpcPort)
-		if err != nil {
-			panic(err)
-		}
-		clients = append(clients, namedClients{"tcp_" + addr, tcpClient})
-		clients = append(clients, namedClients{"grpc_" + addr, grpcClient})
+		clients = append(clients, remoteClients...)
 	}
 
 	// run the test forever
@@ -134,16 +100,101 @@ func main() {
 			}
 			slog.Info("echo measurement",
 				slog.String("client", client.name),
-				slog.Int("measurements", *measurements),
+				slog.Int64("measurements", latencyNanos.Count),
+				slog.Duration("p1", time.Duration(latencyNanos.P1)),
+				slog.Duration("p25", time.Duration(latencyNanos.P25)),
 				slog.Duration("p50", time.Duration(latencyNanos.P50)),
+				slog.Duration("p75", time.Duration(latencyNanos.P75)),
 				slog.Duration("p90", time.Duration(latencyNanos.P90)),
 				slog.Duration("p95", time.Duration(latencyNanos.P95)),
-				// slog.Duration("p99", time.Duration(latencyNanos.P99)),
+				slog.Duration("p99", time.Duration(latencyNanos.P99)),
 			)
+		}
+
+		f, err := os.Create("heap.pprof")
+		if err != nil {
+			panic(err)
+		}
+		err = pprof.Lookup("heap").WriteTo(f, 0)
+		if err != nil {
+			panic(err)
+		}
+		err = f.Close()
+		if err != nil {
+			panic(err)
 		}
 
 		time.Sleep(*interRunSleep)
 	}
+}
+
+type namedClients struct {
+	name   string
+	client echoClient
+}
+
+func connectRemoteClients(remoteAddr string, remoteLookupSleep time.Duration, podIPEnvVar string,
+	tcpPort int, grpcPort int,
+) ([]namedClients, error) {
+
+	// wait for remote hosts
+	if remoteLookupSleep > 0 {
+		slog.Info("sleeping before connecting to remote hosts ...",
+			slog.Duration("remoteLookupSleep", remoteLookupSleep))
+		time.Sleep(remoteLookupSleep)
+	}
+
+	addrs, err := net.LookupHost(remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("found remote addresses",
+		slog.String("remoteAddr", remoteAddr),
+		slog.String("addrs", strings.Join(addrs, ",")))
+
+	if podIPEnvVar != "" {
+		selfAddress := os.Getenv(podIPEnvVar)
+		if selfAddress == "" {
+			slog.Warn("self address not found; keeping all remote hosts",
+				slog.String("podIPEnvVar", podIPEnvVar))
+		} else {
+			// remove self address from the list
+			found := false
+			for i, addr := range addrs {
+				if addr == selfAddress {
+					addrs = slices.Delete(addrs, i, i+1)
+					found = true
+					break
+				}
+			}
+			if !found {
+				slog.Warn("self address not found in remoteAddr: ignoring",
+					slog.String("podIPEnvVar", podIPEnvVar),
+					slog.String("selfAddress", selfAddress),
+					slog.String("addrs", strings.Join(addrs, ",")))
+			} else {
+				slog.Info("removed self address from remote addresses",
+					slog.String("podIPEnvVar", podIPEnvVar),
+					slog.String("selfAddress", selfAddress),
+					slog.String("addrs", strings.Join(addrs, ",")))
+			}
+		}
+	}
+
+	var clients []namedClients
+	for _, addr := range addrs {
+		tcpClient, err := newTCPEchoClient(addr, tcpPort)
+		if err != nil {
+			return nil, err
+		}
+		grpcClient, err := newGRPCEchoClient(addr, grpcPort)
+		if err != nil {
+			return nil, err
+		}
+		clients = append(clients, namedClients{"tcp_" + addr, tcpClient})
+		clients = append(clients, namedClients{"grpc_" + addr, grpcClient})
+	}
+	return clients, nil
 }
 
 // measureEchoLatencyNanos returns the latency in nanoseconds.
@@ -176,7 +227,7 @@ func newTCPEchoClient(addr string, port int) (*tcpEchoClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tcpEchoClient{conn, make([]byte, 0, 4096)}, nil
+	return &tcpEchoClient{conn, make([]byte, 0, tcpInitialBufferBytes)}, nil
 }
 
 func (c *tcpEchoClient) Echo(ctx context.Context, message string) error {
@@ -187,14 +238,17 @@ func (c *tcpEchoClient) Echo(ctx context.Context, message string) error {
 		return err
 	}
 	if n != len(message)+1 {
-		panic("wtf")
+		// Should be impossible: Write must return an error if it returns a short write
+		// but this does test that we created the buffer correctly
+		panic(fmt.Sprintf("tcp echo: must write len(message)+1=%d ; wrote %d", len(message)+1, n))
 	}
 	n, err = io.ReadFull(c.conn, c.buf)
 	if err != nil {
 		return err
 	}
 	if n != len(message)+1 {
-		panic("wtf")
+		panic(fmt.Sprintf("tcp echo: expected to read %d bytes in reply; read %d",
+			len(message)+1, n))
 	}
 	return nil
 }
