@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"runtime/pprof"
 	"slices"
 	"strconv"
 	"strings"
@@ -109,19 +108,6 @@ func main() {
 				slog.Duration("p95", time.Duration(latencyNanos.P95)),
 				slog.Duration("p99", time.Duration(latencyNanos.P99)),
 			)
-		}
-
-		f, err := os.Create("heap.pprof")
-		if err != nil {
-			panic(err)
-		}
-		err = pprof.Lookup("heap").WriteTo(f, 0)
-		if err != nil {
-			panic(err)
-		}
-		err = f.Close()
-		if err != nil {
-			panic(err)
 		}
 
 		time.Sleep(*interRunSleep)
