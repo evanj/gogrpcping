@@ -17,11 +17,6 @@ $(BUILD_DIR)/.gocheck_stamp: $(GOFILES) echopb/echo.pb.go | $(BUILD_DIR)
 	go mod tidy
 	touch $@
 
-BUILD_TAG:=$(shell date +%Y%m%d)-$(shell git rev-parse --short HEAD)
-docker:
-	docker build --progress=plain . --tag=registry.ddbuild.io/experimental/evan.jones/gogrpcping:${BUILD_TAG}
-	docker push registry.ddbuild.io/experimental/evan.jones/gogrpcping:${BUILD_TAG}
-
 echopb/echo.pb.go: proto/echo.proto $(BUILD_DIR)/.proto_format_stamp $(PROTOC) $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 	$(PROTOC) --plugin=$(PROTOC_GEN_GO) --plugin=$(PROTOC_GEN_GO_GRPC) \
 		--go_out=. --go_opt=Mproto/echo.proto=./echopb \
