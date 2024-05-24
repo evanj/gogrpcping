@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/evanj/gogrpcping/echopb"
@@ -41,7 +42,8 @@ func (s *echoServer) Echo(ctx context.Context, request *echopb.EchoRequest) (*ec
 func main() {
 	grpcPort := flag.Int("grpcPort", 8001, "port for gRPC echo requests")
 	tcpPort := flag.Int("tcpPort", 8002, "port for TCP echo requests")
-	listenAddr := flag.String("listenAddr", "localhost", "listening address: use empty to listen on all devices")
+	listenAddr := flag.String("listenAddr", "localhost",
+		"listening address: use empty to listen on all devices")
 	interRunSleep := flag.Duration("interRunSleep", 10*time.Second, "time to sleep between runs")
 	measurements := flag.Int("measurements", 10000, "number of pings to measure")
 	podIPEnvVar := flag.String("podIPEnvVar", "POD_IP",
@@ -49,6 +51,11 @@ func main() {
 	remoteAddr := flag.String("remoteAddr", "", "IP/DNS name for remote endpoints")
 	remoteLookupSleep := flag.Duration("remoteLookupSleep", 0,
 		"sleep before looking up/connecting to remoteAddr: give time to start")
+	throughputGoroutines := flag.Int("throughputGoroutines", 0,
+		"if set: run clients that make requests in a loop as quickly as possible")
+	throughputTime := flag.Duration("throughputTime", time.Minute,
+		"run the throughput test for this long")
+
 	flag.Parse()
 
 	slog.Info("starting TCP and gRPC servers ...",
@@ -64,6 +71,15 @@ func main() {
 	err = startGRPCEchoServer(*listenAddr, *grpcPort)
 	if err != nil {
 		panic(err)
+	}
+
+	if *throughputGoroutines > 0 {
+		err = runThroughputTest(*remoteAddr, *tcpPort, *grpcPort, *throughputGoroutines, *throughputTime)
+		if err != nil {
+			panic(err)
+		}
+		slog.Info("finished throughput test; sleeping")
+		time.Sleep(24 * time.Hour)
 	}
 
 	localhostTCPClient, err := newTCPEchoClient("localhost", *tcpPort)
@@ -112,6 +128,100 @@ func main() {
 
 		time.Sleep(*interRunSleep)
 	}
+}
+
+func runThroughputTest(
+	remoteAddr string, tcpPort int, grpcPort int, goroutines int, measureDuration time.Duration,
+) error {
+
+	addrs, err := net.LookupHost(remoteAddr)
+	if err != nil {
+		return err
+	}
+	slog.Info("found remote addresses",
+		slog.String("remoteAddr", remoteAddr),
+		slog.String("addrs", strings.Join(addrs, ",")))
+
+	for _, ipAddr := range addrs {
+		var clients []echoClient
+		for i := 0; i < goroutines; i++ {
+			tcpClient, err := newTCPEchoClient(ipAddr, tcpPort)
+			if err != nil {
+				return err
+			}
+			clients = append(clients, tcpClient)
+		}
+
+		slog.Info("starting TCP test",
+			slog.String("ipAddr", ipAddr), slog.Int("goroutines", goroutines))
+		requestsPerSecond, err := measureEchoThroughput(clients, measureDuration)
+		if err != nil {
+			return err
+		}
+		slog.Info("TCP throughput results",
+			slog.String("ipAddr", ipAddr),
+			slog.Float64("requestsPerSecond", requestsPerSecond),
+		)
+
+		clients = clients[:0]
+		for i := 0; i < goroutines; i++ {
+			grpcClient, err := newGRPCEchoClient(ipAddr, grpcPort)
+			if err != nil {
+				return err
+			}
+			clients = append(clients, grpcClient)
+		}
+
+		slog.Info("starting gRPC test",
+			slog.String("ipAddr", ipAddr), slog.Int("goroutines", goroutines))
+		requestsPerSecond, err = measureEchoThroughput(clients, measureDuration)
+		if err != nil {
+			return err
+		}
+		slog.Info("gRPC throughput results",
+			slog.String("remoteAddr", remoteAddr),
+			slog.Float64("requestsPerSecond", requestsPerSecond),
+		)
+	}
+
+	return nil
+}
+
+func measureEchoThroughput(clients []echoClient, measureDuration time.Duration) (float64, error) {
+	stopWork := &atomic.Bool{}
+
+	goroutineRequests := make(chan int)
+	for _, client := range clients {
+		go func() {
+			requests := 0
+			for {
+				// poll to see if we should exit
+				if stopWork.Load() {
+					break
+				}
+
+				err := client.Echo(context.Background(), echoMessage)
+				if err != nil {
+					slog.Error("failed sending echo; stopping test",
+						slog.String("error", err.Error()))
+					return
+				}
+				requests++
+			}
+			goroutineRequests <- requests
+		}()
+	}
+
+	time.Sleep(measureDuration)
+	stopWork.Store(true)
+
+	totalRequests := 0
+	for i := 0; i < len(clients); i++ {
+		totalRequests += <-goroutineRequests
+	}
+
+	requestsPerSecond := float64(totalRequests) / measureDuration.Seconds()
+	return requestsPerSecond, nil
 }
 
 type namedClients struct {
@@ -233,8 +343,8 @@ func (c *tcpEchoClient) Echo(ctx context.Context, message string) error {
 		return err
 	}
 	if n != len(message)+1 {
-		panic(fmt.Sprintf("tcp echo: expected to read %d bytes in reply; read %d",
-			len(message)+1, n))
+		panic(fmt.Sprintf("tcp echo: expected to read %d bytes in reply; read %d; c.buf=%#v",
+			len(message)+1, n, string(c.buf[:n])))
 	}
 	return nil
 }
